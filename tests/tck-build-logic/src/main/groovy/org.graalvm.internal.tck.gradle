@@ -261,6 +261,34 @@ Closure<String> nativeImageTool = { String toolName ->
     return toolName
 }
 
+Closure<String> javaTool = { String toolName ->
+    String javaHome = System.getenv("JAVA_HOME")
+    if (javaHome != null && !javaHome.trim().isEmpty()) {
+        File candidate = new File(new File(javaHome, "bin"), toolName)
+        if (candidate.isFile()) {
+            return candidate.absolutePath
+        }
+    }
+    return toolName
+}
+
+Closure<String> commandOutput = { List<String> command, boolean includeErrorOutput = false ->
+    ProcessBuilder processBuilder = new ProcessBuilder(command)
+    processBuilder.redirectErrorStream(includeErrorOutput)
+    Process process = processBuilder.start()
+    String output = process.inputStream.getText("UTF-8").trim()
+    String errorOutput = process.errorStream.getText("UTF-8").trim()
+    int exitCode = process.waitFor()
+    if (exitCode != 0) {
+        String message = "Command failed with exit code ${exitCode}: ${command.join(' ')}"
+        if (!errorOutput.isEmpty()) {
+            message += "\n${errorOutput}"
+        }
+        throw new GradleException(message)
+    }
+    return output
+}
+
 if (runNativeTraceImageTaskRequested) {
     requiredAbsolutePathProperty("traceMetadataPath")
 }
@@ -271,19 +299,28 @@ if (nativeTraceImageTaskRequested && project.hasProperty("metadataConfigDirs")) 
 // Determine native-image build arguments from ci.json.
 def ciJsonFile = tck.repoRoot.file("ci.json").get().asFile
 def nativeImageArgs = []
+def baseLayerNativeImageArgs = []
+String selectedNativeImageMode = NativeImageConfigUtils.resolveSelectedMode(
+        System.getenv("GVM_TCK_NATIVE_IMAGE_MODE"),
+        providers.gradleProperty("tck.nativeImageMode").getOrElse(null)
+)
 if (ciJsonFile.exists()) {
     try {
         def parsed = new JsonSlurper().parse(ciJsonFile)
-        String selectedNativeImageMode = NativeImageConfigUtils.resolveSelectedMode(
-                System.getenv("GVM_TCK_NATIVE_IMAGE_MODE"),
-                providers.gradleProperty("tck.nativeImageMode").getOrElse(null)
-        )
         nativeImageArgs = NativeImageConfigUtils.resolvedBuildArgs(
                 parsed as Map<String, Object>,
                 selectedNativeImageMode,
                 [
                         "{{library.version}}"    : libraryVersion,
                         "{{library.coordinates}}": libraryGAV
+                ]
+        )
+        baseLayerNativeImageArgs = NativeImageConfigUtils.resolvedBuildArgs(
+                parsed as Map<String, Object>,
+                selectedNativeImageMode,
+                [
+                        "{{library.version}}"    : "",
+                        "{{library.coordinates}}": ""
                 ]
         )
     } catch (GradleException e) {
@@ -293,6 +330,44 @@ if (ciJsonFile.exists()) {
     }
 } else {
     throw new GradleException("Required configuration file ci.json not found at expected path: ${ciJsonFile.absolutePath}\"")
+}
+
+String baseLayerFilePath = providers.gradleProperty("tck.baseLayerFile").getOrElse("").trim()
+boolean layeredNativeImage = !baseLayerFilePath.isEmpty()
+File baseLayerFile = layeredNativeImage ? file(baseLayerFilePath) : null
+
+Closure<Map<String, Object>> expectedBaseLayerManifest = { File layerFile ->
+    String baseLayerModules = "module=java.base,module=java.management,module=java.sql,module=jdk.unsupported,module=java.desktop,module=java.scripting,module=jdk.httpserver,module=java.net.http,module=java.sql.rowset,module=jdk.jfr,module=java.smartcardio,module=java.transaction.xa,module=java.security.sasl,module=java.xml,module=jdk.dynalink,module=jdk.sctp,module=jdk.localedata"
+    [
+            "nativeImageVersion": commandOutput([nativeImageTool("native-image"), "--version"], true),
+            "javaVersion"       : commandOutput([javaTool("java"), "-version"], true),
+            "osName"            : System.getProperty("os.name"),
+            "osArch"            : System.getProperty("os.arch"),
+            "nativeImageMode"   : selectedNativeImageMode,
+            "nativeImageArgs"   : baseLayerNativeImageArgs,
+            "layerCreateArg"    : "-H:LayerCreate=${layerFile.name},${baseLayerModules}"
+    ]
+}
+
+Closure<Void> validateBaseLayer = {
+    if (!layeredNativeImage) {
+        return
+    }
+    if (!baseLayerFile.isAbsolute()) {
+        throw new GradleException("Property 'tck.baseLayerFile' must contain an absolute path. Got: ${baseLayerFilePath}")
+    }
+    if (!baseLayerFile.isFile()) {
+        throw new GradleException("Native Image base layer does not exist: ${baseLayerFile.absolutePath}")
+    }
+    File manifestFile = new File(baseLayerFile.parentFile, "manifest.json")
+    if (!manifestFile.isFile()) {
+        throw new GradleException("Native Image base-layer manifest does not exist: ${manifestFile.absolutePath}")
+    }
+    def currentManifest = new JsonSlurper().parse(manifestFile)
+    def expectedManifest = expectedBaseLayerManifest(baseLayerFile)
+    if (currentManifest != expectedManifest) {
+        throw new GradleException("Native Image base-layer manifest does not match the current toolchain and mode: ${manifestFile.absolutePath}")
+    }
 }
 
 tck.testedLibraryVersion = libraryVersion
@@ -404,6 +479,7 @@ Provider<List<String>> nativeTraceBuildArgs = providers.provider {
 
 tasks.named("nativeTestCompile", BuildNativeImageTask).configure { BuildNativeImageTask task ->
     task.doFirst {
+        validateBaseLayer()
         File nativeImageOutputDirectory = task.outputFile.get().asFile.parentFile
         if (!nativeImageOutputDirectory.isDirectory() && !nativeImageOutputDirectory.mkdirs()) {
             throw new GradleException("Failed to create native-image output directory: ${nativeImageOutputDirectory.absolutePath}")
@@ -627,6 +703,14 @@ graalvmNative {
             }
             buildArgs.addAll(nativeImageArgs)
             buildArgs.addAll(nativeTraceBuildArgs)
+            if (layeredNativeImage) {
+                buildArgs.addAll([
+                        "-H:+UnlockExperimentalVMOptions",
+                        "-H:LayerUse=${baseLayerFile.absolutePath}",
+                        "-H:LinkerRPath=${baseLayerFile.parentFile.absolutePath}",
+                        "-H:-UnlockExperimentalVMOptions"
+                ])
+            }
             if (generateDynamicAccessReport) {
                 buildArgs.addAll(providers.provider {
                     DynamicAccessUtils.buildArgsForClasspathEntries(resolveTestedLibraryJars())

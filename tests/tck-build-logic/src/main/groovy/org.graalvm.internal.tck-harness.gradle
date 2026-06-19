@@ -25,6 +25,8 @@ import org.graalvm.internal.tck.harness.tasks.CheckstyleInvocationTask
 import org.graalvm.internal.tck.harness.tasks.CleanInvocationTask
 import org.graalvm.internal.tck.harness.tasks.CompileTestJavaInvocationTask
 import org.graalvm.internal.tck.harness.tasks.JavaTestInvocationTask
+import org.graalvm.internal.tck.harness.tasks.LayeredNativeTestCompileInvocationTask
+import org.graalvm.internal.tck.harness.tasks.LayeredTestInvocationTask
 import org.graalvm.internal.tck.harness.tasks.NativeTestCompileInvocationTask
 import org.graalvm.internal.tck.harness.tasks.NativeTraceImageInvocationTask
 import org.graalvm.internal.tck.harness.tasks.FetchExistingLibrariesWithNewerVersionsTask
@@ -50,6 +52,7 @@ import org.graalvm.internal.tck.harness.tasks.GenerateReadmeBadgeSummaryTask
 import org.graalvm.internal.tck.harness.tasks.RunNativeTraceImageInvocationTask
 import org.graalvm.internal.tck.harness.tasks.SplitTestOnlyMetadataTask
 import org.graalvm.internal.tck.utils.NativeImageConfigUtils
+import org.gradle.process.ExecOperations
 
 
 import static org.graalvm.internal.tck.Utils.generateTaskName
@@ -142,6 +145,65 @@ static String nativeImageTool(String toolName) {
     return toolName
 }
 
+static String javaTool(String toolName) {
+    String javaHome = System.getenv("JAVA_HOME")
+    if (javaHome != null && !javaHome.trim().isEmpty()) {
+        File candidate = new File(new File(javaHome, "bin"), toolName)
+        if (candidate.isFile()) {
+            return candidate.absolutePath
+        }
+    }
+    return toolName
+}
+
+String commandOutput(List<String> command, boolean includeErrorOutput = false) {
+    ProcessBuilder processBuilder = new ProcessBuilder(command)
+    processBuilder.redirectErrorStream(includeErrorOutput)
+    Process process = processBuilder.start()
+    String output = process.inputStream.getText("UTF-8").trim()
+    String errorOutput = process.errorStream.getText("UTF-8").trim()
+    int exitCode = process.waitFor()
+    if (exitCode != 0) {
+        String message = "Command failed with exit code ${exitCode}: ${command.join(' ')}"
+        if (!errorOutput.isEmpty()) {
+            message += "\n${errorOutput}"
+        }
+        throw new GradleException(message)
+    }
+    return output
+}
+
+File configuredBaseLayerFile() {
+    String explicitFile = providers.gradleProperty("tck.baseLayerFile").getOrElse("").trim()
+    if (!explicitFile.isEmpty()) {
+        return file(explicitFile)
+    }
+    String explicitDir = providers.gradleProperty("tck.baseLayerDir")
+            .orElse(providers.environmentVariable("GVM_TCK_BASE_LAYER_DIR"))
+            .getOrElse("")
+            .trim()
+    File baseLayerDir = explicitDir.isEmpty()
+            ? layout.buildDirectory.dir("native-base-layer").get().asFile
+            : file(explicitDir)
+    return new File(baseLayerDir, "base-layer.nil")
+}
+
+Map<String, Object> expectedBaseLayerManifest(File baseLayerFile, List<String> nativeImageArgs) {
+    String baseLayerModules = "module=java.base,module=java.management,module=java.sql,module=jdk.unsupported,module=java.desktop,module=java.scripting,module=jdk.httpserver,module=java.net.http,module=java.sql.rowset,module=jdk.jfr,module=java.smartcardio,module=java.transaction.xa,module=java.security.sasl,module=java.xml,module=jdk.dynalink,module=jdk.sctp,module=jdk.localedata"
+    [
+            "nativeImageVersion": commandOutput([nativeImageTool("native-image"), "--version"], true),
+            "javaVersion"       : commandOutput([javaTool("java"), "-version"], true),
+            "osName"            : System.getProperty("os.name"),
+            "osArch"            : System.getProperty("os.arch"),
+            "nativeImageMode"   : NativeImageConfigUtils.resolveSelectedMode(
+                    System.getenv("GVM_TCK_NATIVE_IMAGE_MODE"),
+                    project.findProperty("tck.nativeImageMode")?.toString()
+            ),
+            "nativeImageArgs"   : nativeImageArgs,
+            "layerCreateArg"    : "-H:LayerCreate=${baseLayerFile.name},${baseLayerModules}"
+    ]
+}
+
 List<String> matchingCoordinates
 if (CoordinateUtils.isFractionalBatch(coordinateFilter)) {
     def frac = CoordinateUtils.parseFraction(coordinateFilter)
@@ -175,6 +237,80 @@ tasks.register("javaTest", JavaTestInvocationTask.class) { task ->
 tasks.register("nativeTestCompile", NativeTestCompileInvocationTask.class) { task ->
     task.setDescription("Compiles native tests (nativeTestCompile) for all subprojects")
     task.setGroup(LifecycleBasePlugin.BUILD_GROUP)
+}
+
+tasks.register("buildBaseLayer") { task ->
+    task.setDescription("Builds the shared JDK module Native Image layer used by layered TCK tests")
+    task.setGroup(LifecycleBasePlugin.BUILD_GROUP)
+    task.doLast {
+        File baseLayerFile = configuredBaseLayerFile()
+        if (!baseLayerFile.name.endsWith(".nil")) {
+            throw new GradleException("Native Image base-layer file must end with .nil: ${baseLayerFile.absolutePath}")
+        }
+        File baseLayerDir = baseLayerFile.parentFile
+        File manifestFile = new File(baseLayerDir, "manifest.json")
+        def ci = loadCi()
+        String selectedNativeImageMode = NativeImageConfigUtils.resolveSelectedMode(
+                System.getenv("GVM_TCK_NATIVE_IMAGE_MODE"),
+                project.findProperty("tck.nativeImageMode")?.toString()
+        )
+        List<String> nativeImageArgs = NativeImageConfigUtils.resolvedBuildArgs(
+                ci as Map<String, Object>,
+                selectedNativeImageMode,
+                [
+                        "{{library.version}}"    : "",
+                        "{{library.coordinates}}": ""
+                ]
+        )
+        Map<String, Object> expectedManifest = expectedBaseLayerManifest(baseLayerFile, nativeImageArgs)
+        if (baseLayerFile.isFile() && manifestFile.isFile()) {
+            def currentManifest = new JsonSlurper().parse(manifestFile)
+            if (currentManifest == expectedManifest) {
+                logger.lifecycle("Reusing Native Image base layer at ${baseLayerFile.absolutePath}")
+                return
+            }
+            logger.lifecycle("Native Image base layer manifest changed; rebuilding ${baseLayerFile.absolutePath}")
+        }
+
+        delete(baseLayerDir)
+        if (!baseLayerDir.mkdirs()) {
+            throw new GradleException("Failed to create base-layer directory: ${baseLayerDir.absolutePath}")
+        }
+        List<String> commandLineArgs = [nativeImageTool("native-image")]
+        commandLineArgs.addAll(nativeImageArgs)
+        File nativeImageTmpDir = new File(baseLayerDir.parentFile, "${baseLayerDir.name}.tmp")
+        delete(nativeImageTmpDir)
+        if (!nativeImageTmpDir.mkdirs()) {
+            throw new GradleException("Failed to create base-layer temporary directory: ${nativeImageTmpDir.absolutePath}")
+        }
+        String outputStem = baseLayerFile.name.substring(0, baseLayerFile.name.length() - ".nil".length())
+        File outputFile = new File(baseLayerDir, "lib${outputStem}")
+        commandLineArgs.add("-J-Djava.io.tmpdir=${nativeImageTmpDir.absolutePath}")
+        commandLineArgs.add("-o")
+        commandLineArgs.add(outputFile.absolutePath)
+        commandLineArgs.add("-H:+UnlockExperimentalVMOptions")
+        commandLineArgs.add(expectedManifest["layerCreateArg"] as String)
+        commandLineArgs.add("-H:-UnlockExperimentalVMOptions")
+        ExecOperations execOps = project.services.get(ExecOperations)
+        try {
+            execOps.exec {
+                workingDir = baseLayerDir
+                commandLine commandLineArgs
+            }
+        } finally {
+            delete(nativeImageTmpDir)
+        }
+        if (!baseLayerFile.isFile()) {
+            throw new GradleException("Native Image base-layer build did not create ${baseLayerFile.absolutePath}")
+        }
+        manifestFile.text = JsonOutput.prettyPrint(JsonOutput.toJson(expectedManifest)) + System.lineSeparator()
+    }
+}
+
+tasks.register("nativeTestCompileLayered", LayeredNativeTestCompileInvocationTask.class) { task ->
+    task.setDescription("Compiles native tests with LayerUse for all subprojects")
+    task.setGroup(LifecycleBasePlugin.BUILD_GROUP)
+    task.dependsOn(tasks.named("buildBaseLayer"))
 }
 
 // gradle nativeTraceImage -Pcoordinates=<maven-coordinates> [-PmetadataConfigDirs=<dir1,dir2,...>]
@@ -247,6 +383,12 @@ if (tasks.findByName("test") == null) {
         t.setGroup(JavaBasePlugin.VERIFICATION_GROUP)
     }
     tasks.named("test").configure { it.dependsOn("tckTest") }
+}
+
+tasks.register("testLayered", LayeredTestInvocationTask.class) { task ->
+    task.setDescription("Runs Native Image tests with LayerUse for all matching coordinates")
+    task.setGroup(JavaBasePlugin.VERIFICATION_GROUP)
+    task.dependsOn(tasks.named("buildBaseLayer"))
 }
 
 tasks.register("validateIndexFiles", ValidateIndexFilesTask.class) { task ->

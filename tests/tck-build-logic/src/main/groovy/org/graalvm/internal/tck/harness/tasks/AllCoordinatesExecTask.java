@@ -206,6 +206,25 @@ public abstract class AllCoordinatesExecTask extends CoordinatesAwareTask {
         }
     }
 
+    /**
+     * Forward the shared Native Image base-layer file to per-coordinate builds.
+     */
+    protected void appendBaseLayerFileProperty(List<String> command) {
+        Object layerFile = getProject().findProperty("tck.baseLayerFile");
+        if (layerFile != null) {
+            command.add("-Ptck.baseLayerFile=" + layerFile);
+            return;
+        }
+        Object layerDir = getProject().findProperty("tck.baseLayerDir");
+        if (layerDir == null) {
+            layerDir = System.getenv("GVM_TCK_BASE_LAYER_DIR");
+        }
+        File baseLayerFile = layerDir == null
+                ? getProject().getLayout().getBuildDirectory().file("native-base-layer/base-layer.nil").get().getAsFile()
+                : new File(layerDir.toString(), "base-layer.nil");
+        command.add("-Ptck.baseLayerFile=" + baseLayerFile.getAbsolutePath());
+    }
+
     private static String md5(String s) {
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");

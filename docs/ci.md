@@ -201,6 +201,16 @@ reads `nativeBuildTools` from its `libs.versions.toml`, publishes it to
 `mavenLocal`, and updates the caller repo's catalog to match — so a PR can be
 tested against an in-progress NBT change just by matching branch names.
 
+### CI-setup-native-image-base-layer: setup-native-image-base-layer action
+
+A composite action that restores or builds the shared JDK-module Native Image
+base layer used by the layered TCK lane (§TCK-test-harness.3). Its cache key is
+derived from the actual installed `native-image --version`, `java -version`,
+runner OS/architecture, selected native-image mode, `ci.json`, and TCK build
+logic inputs. The action exports `GVM_TCK_BASE_LAYER_DIR` so subsequent Gradle
+invocations in the manual layered workflow consume the exact cached layer
+directory.
+
 ## CI-shared-scripts: Shared scripts and test isolation
 
 Helpers under `.github/workflows/scripts/` used by the workflows above (these are

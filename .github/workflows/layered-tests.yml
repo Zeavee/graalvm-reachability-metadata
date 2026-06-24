@@ -67,4 +67,30 @@ jobs:
 
       - name: "Run layered tests"
         run: |
-          ./gradlew testLayered -Pcoordinates="${{ inputs.coordinates }}" --stacktrace
+          set +e
+          failure_report="${RUNNER_TEMP}/layered-test-failures.txt"
+          ./gradlew testLayered \
+            -Pcoordinates="${{ inputs.coordinates }}" \
+            -Ptck.layered.continueOnCoordinateFailure=true \
+            -Ptck.layered.coordinateFailureReport="${failure_report}" \
+            --stacktrace
+          result=$?
+          set -e
+
+          if [[ -s "${failure_report}" ]]; then
+            failure_count="$(wc -l < "${failure_report}" | tr -d ' ')"
+            {
+              echo "### Layered test failures"
+              echo
+              echo "Failing libraries: ${failure_count}"
+              echo
+              while IFS= read -r coordinates; do
+                echo "- \`${coordinates}\`"
+              done < "${failure_report}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+
+            echo "Layered test failures (${failure_count}):"
+            sed 's/^/ - /' "${failure_report}"
+          fi
+
+          exit "${result}"

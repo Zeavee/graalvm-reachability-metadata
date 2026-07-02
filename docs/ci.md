@@ -167,6 +167,19 @@ version `SNAPSHOT`, deletes the previous snapshot release/tag when present,
 force-pushes a fresh `SNAPSHOT` tag, and marks the release as not GitHub's
 Latest release (§FS-repository-functional-spec.4.4, §GOAL-fresh-metadata).
 
+## Manual workflows
+
+### CI-layered-tests: Layered tests
+
+Manual-only, fork-friendly coverage for the cached Native Image base-layer TCK
+lane (§TCK-test-harness.3). A dispatch for an explicit coordinate or fractional
+batch runs one job. A dispatch with `coordinates: all` expands to sixteen
+independent `k/16` jobs, with fail-fast disabled and a six-hour timeout per
+shard. Each shard validates metadata, pulls its allowed Docker images, and runs
+`testLayered` in failure-collecting mode, reporting its failed-library count and
+list in the GitHub Actions job summary. It does not run on pushes, pull requests,
+or schedules, and does not gate the existing CI workflows.
+
 ## Event-triggered automation
 
 ### CI-triage-new-issues: Triage new issues

@@ -1,4 +1,5 @@
 # Manual fork-friendly smoke test for the cached layered Native Image lane.
+# §CI-layered-tests
 name: "Layered tests"
 
 on:
@@ -29,10 +30,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  layered-tests:
-    name: "Test ${{ inputs.coordinates }} on ${{ inputs.ref }}"
+  prepare-shards:
+    name: "Prepare layered test shards"
     runs-on: "ubuntu-latest"
-    timeout-minutes: 120
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+
+    steps:
+      - name: "Create coordinate matrix"
+        id: matrix
+        env:
+          COORDINATES: ${{ inputs.coordinates }}
+        run: |
+          if [[ "${COORDINATES}" == "all" ]]; then
+            matrix="$(jq -cn '{coordinates: [range(1; 17) | "\(.)/16"]}')"
+          else
+            matrix="$(jq -cn --arg coordinates "${COORDINATES}" '{coordinates: [$coordinates]}')"
+          fi
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+
+  layered-tests:
+    name: "Test ${{ matrix.coordinates }} on ${{ inputs.ref }}"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 360
+    needs: prepare-shards
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix: ${{ fromJson(needs.prepare-shards.outputs.matrix) }}
     env:
       GVM_TCK_NATIVE_IMAGE_MODE: ${{ inputs.native-image-mode }}
 
@@ -59,18 +85,18 @@ jobs:
 
       - name: "Pull allowed docker images"
         run: |
-          ./gradlew pullAllowedDockerImages -Pcoordinates="${{ inputs.coordinates }}"
+          ./gradlew pullAllowedDockerImages -Pcoordinates="${{ matrix.coordinates }}"
 
       - name: "Check metadata files content"
         run: |
-          ./gradlew checkMetadataFiles -Pcoordinates="${{ inputs.coordinates }}"
+          ./gradlew checkMetadataFiles -Pcoordinates="${{ matrix.coordinates }}"
 
       - name: "Run layered tests"
         run: |
           set +e
           failure_report="${RUNNER_TEMP}/layered-test-failures.txt"
           ./gradlew testLayered \
-            -Pcoordinates="${{ inputs.coordinates }}" \
+            -Pcoordinates="${{ matrix.coordinates }}" \
             -Ptck.layered.continueOnCoordinateFailure=true \
             -Ptck.layered.coordinateFailureReport="${failure_report}" \
             --stacktrace

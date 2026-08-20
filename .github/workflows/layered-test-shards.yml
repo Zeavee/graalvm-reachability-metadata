@@ -35,7 +35,6 @@ jobs:
       LAYER_NAME: ${{ matrix.lane }}
       LAYER_TASK: ${{ matrix.lane == 'Shared' && 'testSharedLayer' || 'testDedicatedLayer' }}
       FAILURE_REPORT_NAME: ${{ matrix.lane == 'Shared' && 'shared-layer-test-failures.txt' || 'dedicated-layer-test-failures.txt' }}
-      EXCLUDED_COORDINATES_FILE: ${{ matrix.lane == 'Shared' && 'tests/tck-build-logic/src/main/resources/shared-layered-test-exclusions.txt' || 'tests/tck-build-logic/src/main/resources/dedicated-layer-test-exclusions.txt' }}
       DELETE_DEDICATED_LAYER: ${{ matrix.lane == 'Dedicated' }}
       BASE_ARTIFACT: ${{ inputs.base-artifact }}
 
@@ -111,7 +110,6 @@ jobs:
           ./gradlew "${LAYER_TASK}" \
             "${base_options[@]}" \
             -Pcoordinates="${COORDINATES}" \
-            -Ptck.excludedCoordinatesFile="${EXCLUDED_COORDINATES_FILE}" \
             -Ptck.layered.continueOnCoordinateFailure=true \
             -Ptck.layered.coordinateFailureReport="${failure_report}" \
             -Ptck.layered.deleteDedicatedLayerAfterTest="${DELETE_DEDICATED_LAYER}" \

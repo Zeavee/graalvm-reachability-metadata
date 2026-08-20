@@ -141,7 +141,8 @@ lane and a library-layer lane that creates one base layer per coordinate with
 the tested library code included (§TCK-test-harness.3).
 Dedicated layers are deleted after each coordinate to bound runner disk use;
 failures are collected independently so the two layer layouts remain directly
-comparable.
+comparable. Neither lane applies a coordinate exclusion list, so every selected
+coordinate is exercised and reported.
 
 ### CI-test-all-metadata: Test all metadata
 

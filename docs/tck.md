@@ -124,11 +124,9 @@ they explicitly request the same cleanup behavior.
 `-Ptck.layered.coordinateFailureReport=<file>`, it writes one failed coordinate
 per line before failing the task at the end of the batch.
 
-The manual layered workflow supplies `-Ptck.excludedCoordinatesFile` with the
-shared-layer residual-failure list to the shared lane and the dedicated-layer
-residual-failure list to the dedicated lane. This keeps known failures from
-hiding new failures while allowing each lane's failures to be triaged
-independently. Other workflows do not supply an exclusion file.
+The manual layered workflow does not supply `-Ptck.excludedCoordinatesFile` to
+either lane. Every selected coordinate therefore runs, including known layered
+failures, and each lane reports its failures independently.
 
 ### 3.1 Running the JVM lane on a different JDK
 

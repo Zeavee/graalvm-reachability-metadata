@@ -5,21 +5,16 @@
  * work. If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
  */
 import groovy.json.JsonOutput
-import groovy.json.JsonSlurper
 import org.graalvm.internal.tck.utils.DynamicAccessUtils
-import org.graalvm.internal.tck.utils.BaseLayerUtils
-import org.graalvm.internal.tck.utils.JarUtils
-import org.graalvm.internal.tck.utils.NativeImageConfigUtils
 import org.graalvm.internal.tck.utils.RealUseUtils
 
+import org.graalvm.internal.tck.nativeimage.TestedLibraryArtifacts
+import org.graalvm.internal.tck.nativeimage.NativeImageLayers
+import org.graalvm.internal.tck.nativeimage.NativeImageDiagnostics
 import org.graalvm.buildtools.gradle.tasks.BuildNativeImageTask
 import org.graalvm.buildtools.gradle.tasks.NativeRunTask
-import org.gradle.api.artifacts.ResolvedArtifact
-import org.gradle.api.artifacts.ResolvedDependency
-import org.gradle.api.file.Directory
 import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.PathSensitivity
-import org.gradle.api.tasks.TaskProvider
 
 import java.util.jar.JarFile
 import java.util.regex.Matcher
@@ -117,7 +112,7 @@ plugins.withId("org.jetbrains.kotlin.jvm") {
     }
 }
 
-tasks.withType(org.graalvm.buildtools.gradle.tasks.BuildNativeImageTask).configureEach { task ->
+tasks.withType(BuildNativeImageTask).configureEach { task ->
     if (task.name == "nativeTestCompile") {
         // Restrict cacheability to the dynamic-access reporting lane.
         task.outputs.cacheIf("Enabled only when generating dynamic-access reports") {
@@ -227,74 +222,6 @@ String overrideVal = System.getenv("GVM_TCK_EXCLUDE") ?: providers.gradlePropert
 overrideVal = overrideVal ?: "false"
 boolean override = overrideVal.toBoolean()
 
-String generateDynamicAccessReportVal = providers.gradleProperty('tck.generateDynamicAccessReport').getOrElse("false")
-boolean generateDynamicAccessReportTaskRequested = gradle.startParameter.taskNames.any { taskName ->
-    taskName == "generateDynamicAccessReport" || taskName.endsWith(":generateDynamicAccessReport")
-}
-boolean generateDynamicAccessReport = generateDynamicAccessReportVal.toBoolean() || generateDynamicAccessReportTaskRequested
-
-Closure<Boolean> isTaskRequested = { String taskName ->
-    gradle.startParameter.taskNames.any { String requestedTaskName ->
-        requestedTaskName == taskName || requestedTaskName.endsWith(":${taskName}")
-    }
-}
-
-boolean informationalTaskRequested = isTaskRequested("help") || isTaskRequested("tasks") || isTaskRequested("properties")
-boolean nativeTraceImageTaskRequested = !informationalTaskRequested &&
-        (isTaskRequested("nativeTraceImage") || isTaskRequested("runNativeTraceImage"))
-boolean runNativeTraceImageTaskRequested = !informationalTaskRequested && isTaskRequested("runNativeTraceImage")
-boolean nativeTestTaskRequested = !informationalTaskRequested &&
-        (isTaskRequested("nativeTest") || isTaskRequested("nativeTestCompile"))
-// §AR-test-harness.8, §forge/AR-code-coverage-deep-navigation.1.1: deep-path guidance
-// needs an instrumented, sampling image plus the analysis call-tree CSV graph;
-// JaCoCo alone decides coverage.
-boolean nativeTestPGOSamplingTaskRequested = !informationalTaskRequested &&
-        (isTaskRequested("nativeTestPGOSampling") || isTaskRequested("runNativeTestPGO"))
-// Native Image requires a sampling period of at least 100 microseconds.
-String pgoSamplingPeriodMicros = providers.gradleProperty("pgoSamplingPeriodMicros").getOrElse("100")
-
-Closure<String> requiredGradleProperty = { String propertyName ->
-    String propertyValue = providers.gradleProperty(propertyName).getOrElse("")
-    if (propertyValue.trim().isEmpty()) {
-        throw new GradleException("Missing '${propertyName}' property! Rerun Gradle with '-P${propertyName}=<value>'")
-    }
-    return propertyValue
-}
-
-Closure<List<String>> commaSeparatedGradleProperty = { String propertyName ->
-    String propertyValue = providers.gradleProperty(propertyName).getOrElse("")
-    if (propertyValue.trim().isEmpty()) {
-        return []
-    }
-    return propertyValue.split(",")
-            .collect { String value -> value.trim() }
-            .findAll { String value -> !value.isEmpty() }
-}
-
-Closure<List<File>> requiredDirectoryListProperty = { String propertyName, boolean requireAbsolute ->
-    List<String> propertyValues = commaSeparatedGradleProperty(propertyName)
-    if (propertyValues.isEmpty()) {
-        requiredGradleProperty(propertyName)
-    }
-    return propertyValues.collect { String propertyValue ->
-        File directory = file(propertyValue)
-        if (requireAbsolute && !new File(propertyValue).isAbsolute()) {
-            throw new GradleException("Property '${propertyName}' must contain absolute paths. Got: ${propertyValue}")
-        }
-        if (!directory.isDirectory()) {
-            throw new GradleException("Property '${propertyName}' must contain existing directories. Missing: ${directory.absolutePath}")
-        }
-        return directory
-    }
-}
-
-Closure<String> requiredAbsolutePathProperty = { String propertyName ->
-    String propertyValue = requiredGradleProperty(propertyName)
-    if (!new File(propertyValue).isAbsolute()) {
-        throw new GradleException("Property '${propertyName}' must contain an absolute path. Got: ${propertyValue}")
-    }
-    return propertyValue
-}
 
 Closure<String> nativeImageTool = { String toolName ->
     List<String> toolHomeVariables = ["GRAALVM_HOME", "JAVA_HOME"]
@@ -314,65 +241,15 @@ Closure<String> nativeImageTool = { String toolName ->
     return toolName
 }
 
-if (runNativeTraceImageTaskRequested) {
-    requiredAbsolutePathProperty("traceMetadataPath")
-}
-if (nativeTraceImageTaskRequested && project.hasProperty("metadataConfigDirs")) {
-    requiredDirectoryListProperty("metadataConfigDirs", false)
-}
 
-// Determine native-image build arguments from ci.json.
-def ciJsonFile = tck.repoRoot.file("ci.json").get().asFile
-def nativeImageArgs = []
-def baseLayerNativeImageArgs = []
-String selectedNativeImageMode = NativeImageConfigUtils.resolveSelectedMode(
-        System.getenv("GVM_TCK_NATIVE_IMAGE_MODE"),
-        providers.gradleProperty("tck.nativeImageMode").getOrElse(null)
-)
-if (ciJsonFile.exists()) {
-    try {
-        def parsed = new JsonSlurper().parse(ciJsonFile)
-        nativeImageArgs = NativeImageConfigUtils.resolvedBuildArgs(
-                parsed as Map<String, Object>,
-                selectedNativeImageMode,
-                [
-                        "{{library.version}}"    : libraryVersion,
-                        "{{library.coordinates}}": libraryGAV
-                ]
-        )
-        baseLayerNativeImageArgs = NativeImageConfigUtils.resolvedBuildArgs(
-                parsed as Map<String, Object>,
-                selectedNativeImageMode,
-                [
-                        "{{library.version}}"    : "",
-                        "{{library.coordinates}}": ""
-                ]
-        )
-    } catch (GradleException e) {
-        throw e
-    } catch (Exception e) {
-        throw new GradleException("Failed to resolve native-image args from ci.json", e)
-    }
-} else {
-    throw new GradleException("Required configuration file ci.json not found at expected path: ${ciJsonFile.absolutePath}\"")
-}
+TestedLibraryArtifacts artifacts = new TestedLibraryArtifacts(project, libraryGAV)
+NativeImageLayers nativeLayers = new NativeImageLayers(project, libraryGAV, libraryVersion,
+        file(metadataPath), nativeImageTool)
+List<String> nativeImageArgs = nativeLayers.nativeImageArgs
+NativeImageDiagnostics diagnostics = new NativeImageDiagnostics(project, libraryGAV, metadataPath,
+        nativeImageTool, artifacts, nativeLayers)
+boolean generateDynamicAccessReport = diagnostics.generateDynamicAccessReport
 
-String baseLayerFilePath = providers.gradleProperty("tck.baseLayerFile").getOrElse("").trim()
-boolean layeredNativeImage = !baseLayerFilePath.isEmpty()
-boolean dedicatedLayer = providers.gradleProperty("tck.dedicatedLayer")
-        .map { String value -> value.toBoolean() }
-        .getOrElse(false)
-File baseLayerFile = layeredNativeImage ? file(baseLayerFilePath) : null
-if (dedicatedLayer && !layeredNativeImage) {
-    throw new GradleException("Property 'tck.dedicatedLayer=true' requires 'tck.baseLayerFile'.")
-}
-if (layeredNativeImage) {
-    // GR-80256: discover network interfaces at runtime in both layers. §FS-tests.3.1
-    nativeImageArgs.addAll([
-            "--initialize-at-run-time=io.netty.util.NetUtil",
-            "--initialize-at-run-time=io.grpc.netty.shaded.io.netty.util.NetUtil"
-    ])
-}
 
 tck.testedLibraryVersion = libraryVersion
 // This value can be used to request specific library version to test with.
@@ -385,320 +262,13 @@ dependencies {
     testRuntimeOnly "org.junit.platform:junit-platform-launcher"
 }
 
-Closure<List<ResolvedArtifact>> resolveTestedLibraryArtifacts = {
-    String targetGroup = ""
-    String targetArtifact = ""
-    String targetVersion = ""
-    String[] coordsParts = (libraryGAV ?: "").split(":")
-    if (coordsParts.length >= 3) {
-        targetGroup = coordsParts[0]
-        targetArtifact = coordsParts[1]
-        targetVersion = coordsParts[2]
-    }
 
-    Set<ResolvedArtifact> artifacts = configurations.testRuntimeClasspath.resolvedConfiguration.resolvedArtifacts
-    Set<ResolvedArtifact> matched = new LinkedHashSet<>(artifacts.findAll { ResolvedArtifact artifact ->
-        (artifact.moduleVersion.id.group == targetGroup) && (artifact.moduleVersion.id.name == targetArtifact)
-    })
-
-    if (matched.isEmpty()) {
-        // Fallback for relocated or substituted modules: the requested G:A coordinates may resolve
-        // to a different group in published metadata, so no resolved artifact carries the original group.
-        matched.addAll(artifacts.findAll { ResolvedArtifact artifact ->
-            (artifact.moduleVersion.id.name == targetArtifact) && (artifact.moduleVersion.id.version == targetVersion)
-        })
-    }
-
-    if (matched.isEmpty()) {
-        throw new GradleException("No eligible artifacts found on the classpath for ${libraryGAV}.\nPlease verify that the provided artifact exists.")
-    }
-
-    return matched.toList().sort { ResolvedArtifact artifact -> artifact.file.absolutePath }
-}
-
-Closure<List<File>> resolveTestedLibraryJars = {
-    return resolveTestedLibraryArtifacts().collect { ResolvedArtifact artifact -> artifact.file }
-}
-
-Closure<List<Map<String, String>>> resolveTestedLibraryDependencyArtifacts = {
-    String[] coordinates = libraryGAV.split(":")
-    if (coordinates.length < 3) {
-        throw new GradleException("Cannot resolve runtime dependencies without tested library coordinates.")
-    }
-
-    Set<ResolvedDependency> firstLevelDependencies =
-            configurations.testRuntimeClasspath.resolvedConfiguration.firstLevelModuleDependencies
-    ResolvedDependency testedLibrary = firstLevelDependencies.find { ResolvedDependency dependency ->
-        dependency.moduleGroup == coordinates[0] && dependency.moduleName == coordinates[1]
-    }
-    if (testedLibrary == null) {
-        testedLibrary = firstLevelDependencies.find { ResolvedDependency dependency ->
-            dependency.moduleName == coordinates[1] && dependency.moduleVersion == coordinates[2]
-        }
-    }
-    if (testedLibrary == null) {
-        throw new GradleException("Cannot find resolved runtime dependency root for ${libraryGAV}.")
-    }
-
-    List<ResolvedDependency> pending = [testedLibrary]
-    Set<String> visited = new LinkedHashSet<>()
-    List<Map<String, String>> artifacts = []
-    while (!pending.isEmpty()) {
-        ResolvedDependency dependency = pending.removeFirst()
-        String coordinate = "${dependency.moduleGroup}:${dependency.moduleName}:${dependency.moduleVersion}"
-        if (!visited.add(coordinate)) {
-            continue
-        }
-        dependency.moduleArtifacts
-                .findAll { ResolvedArtifact artifact -> artifact.file.isFile() && artifact.file.name.endsWith(".jar") }
-                .sort { ResolvedArtifact artifact -> artifact.file.absolutePath }
-                .each { ResolvedArtifact artifact ->
-                    artifacts.add([coordinate: coordinate, file: artifact.file.absolutePath])
-                }
-        pending.addAll(dependency.children.sort { ResolvedDependency child ->
-            "${child.moduleGroup}:${child.moduleName}:${child.moduleVersion}"
-        })
-    }
-    return artifacts
-}
-
-Closure<List<File>> resolveTestedLibraryMainJars = {
-    String requestedVersion = libraryGAV.split(":")[2]
-    List<ResolvedArtifact> mainArtifacts = resolveTestedLibraryArtifacts().findAll { ResolvedArtifact artifact ->
-        JarUtils.isMainJar(artifact.extension, artifact.classifier, requestedVersion, artifact.moduleVersion.id.version)
-    }
-    if (mainArtifacts.isEmpty()) {
-        throw new GradleException(
-                "No main JAR found on the classpath for ${libraryGAV}.\n" +
-                        "Please verify that the coordinate publishes a main JAR."
-        )
-    }
-    return mainArtifacts.collect { ResolvedArtifact artifact -> artifact.file }
-}
-
-Closure<List<File>> resolveJUnitRuntimeJars = {
-    Set<File> matched = new LinkedHashSet<>(
-            configurations.nativeImageTestClasspath.resolvedConfiguration.resolvedArtifacts.findAll { artifact ->
-                BaseLayerUtils.isJUnitRuntimeArtifact(
-                        artifact.moduleVersion.id.group,
-                        artifact.moduleVersion.id.name)
-            }.collect { artifact ->
-                artifact.file
-            })
-    if (matched.isEmpty()) {
-        throw new GradleException("No JUnit runtime artifacts found on the test runtime classpath.")
-    }
-    return matched.toList().sort { File file -> file.absolutePath }
-}
-
-Closure<List<File>> resolveDedicatedLayerJars = {
-    Set<File> includedJars = new LinkedHashSet<>(resolveTestedLibraryJars())
-    includedJars.addAll(resolveJUnitRuntimeJars())
-    return includedJars.toList().sort { File file -> file.absolutePath }
-}
-
-File coordinateMetadataDirectory = file(metadataPath).absoluteFile
-String coordinateMetadataArgument = "-H:ConfigurationFileDirectories=${coordinateMetadataDirectory.absolutePath}"
-String junitPlatformFeatureArgument = "--features=org.graalvm.junit.platform.JUnitPlatformFeature"
-TaskProvider<BuildNativeImageTask> nativeTestCompileTask = tasks.named(
-        "nativeTestCompile", BuildNativeImageTask)
-Provider<Directory> dedicatedLayerJUnitTestListDirectory = layout.buildDirectory.dir(
-        "native/generated/dedicatedLayerJUnitTestList")
-Provider<Directory> dedicatedLayerConfigurationDirectory = layout.buildDirectory.dir(
-        "native/generated/dedicatedLayerConfiguration")
-Provider<Directory> dedicatedLayerReachabilityMetadataDirectory = layout.buildDirectory.dir(
-        "native/generated/dedicatedLayerReachabilityMetadata")
-
-if (dedicatedLayer) {
-    tasks.named("processTestResources").configure { task ->
-        task.exclude("META-INF/native-image/**/reachability-metadata.json")
-    }
-    tasks.named("generateTestResourcesConfigFile").configure { task ->
-        task.dependsOn(tasks.named("processTestResources"))
-    }
-}
-
-tasks.register("generateDedicatedLayerJUnitTestList") { task ->
-    task.setDescription("Generates engine-root JUnit selectors for the dedicated layer")
-    task.setGroup("build")
-    task.outputs.dir(dedicatedLayerJUnitTestListDirectory)
-    task.doLast {
-        File outputDirectory = dedicatedLayerJUnitTestListDirectory.get().asFile
-        delete(outputDirectory)
-        if (!outputDirectory.mkdirs()) {
-            throw new GradleException("Failed to create base-layer JUnit test-list directory: " +
-                    outputDirectory.absolutePath)
-        }
-        File selectorsFile = new File(outputDirectory, "junit-platform-unique-ids-base")
-        List<String> engineRootSelectors = [
-                "[engine:junit-jupiter]",
-                "[engine:junit-vintage]"
-        ]
-        selectorsFile.text = engineRootSelectors.join(System.lineSeparator()) + System.lineSeparator()
-    }
-}
-
-Closure<List<File>> resolveTestReachabilityMetadataFiles = {
-    return sourceSets.test.resources.srcDirs.collectMany { File resourceDirectory ->
-        fileTree(resourceDirectory) {
-            include("META-INF/native-image/**/reachability-metadata.json")
-        }.files
-    }.unique().sort { File file -> file.absolutePath }
-}
-
-Closure<Object> withoutReachabilityConditions
-withoutReachabilityConditions = { Object value ->
-    if (value instanceof Map) {
-        Map<String, Object> result = new LinkedHashMap<>()
-        value.each { Object key, Object nestedValue ->
-            if (key != "condition") {
-                result.put(key.toString(), withoutReachabilityConditions(nestedValue))
-            }
-        }
-        return result
-    }
-    if (value instanceof List) {
-        return value.collect { Object nestedValue -> withoutReachabilityConditions(nestedValue) }
-    }
-    return value
-}
-
-tasks.register("prepareDedicatedLayerReachabilityMetadata") { task ->
-    task.setDescription("Prepares test-scoped reachability metadata for dedicated-layer builds")
-    task.setGroup("build")
-    task.inputs.files(providers.provider { resolveTestReachabilityMetadataFiles() })
-            .withPropertyName("testReachabilityMetadata")
-            .withPathSensitivity(PathSensitivity.RELATIVE)
-    task.outputs.dir(dedicatedLayerReachabilityMetadataDirectory)
-    task.doLast {
-        File outputDirectory = dedicatedLayerReachabilityMetadataDirectory.get().asFile
-        delete(outputDirectory)
-        if (!outputDirectory.mkdirs()) {
-            throw new GradleException("Failed to create dedicated-layer reachability metadata directory: " +
-                    outputDirectory.absolutePath)
-        }
-        resolveTestReachabilityMetadataFiles().eachWithIndex { File metadataFile, int index ->
-            File metadataDirectory = new File(outputDirectory, "entry-${index}")
-            if (!metadataDirectory.mkdirs()) {
-                throw new GradleException("Failed to create dedicated-layer metadata entry: " +
-                        metadataDirectory.absolutePath)
-            }
-            Object metadata = new JsonSlurper().parse(metadataFile)
-            String json = JsonOutput.prettyPrint(JsonOutput.toJson(withoutReachabilityConditions(metadata)))
-            new File(metadataDirectory, "reachability-metadata.json").text =
-                    json + System.lineSeparator()
-        }
-    }
-}
-
-Closure<List<File>> resolveDedicatedLayerReachabilityMetadataDirectories = {
-    File outputDirectory = dedicatedLayerReachabilityMetadataDirectory.get().asFile
-    return resolveTestReachabilityMetadataFiles().indices.collect { int index ->
-        new File(outputDirectory, "entry-${index}")
-    }
-}
-
-Closure<List<File>> resolveNativeTestConfigurationDirectories = {
-    Set<File> directories = new LinkedHashSet<>(nativeTestCompileTask.get()
-            .options.get().configurationFileDirectories.files)
-    directories.add(coordinateMetadataDirectory)
-    directories.addAll(resolveDedicatedLayerReachabilityMetadataDirectories())
-    return directories.findAll { File directory -> directory.isDirectory() }
-            .toList()
-            .sort { File directory -> directory.absolutePath }
-}
-
-tasks.register("prepareDedicatedLayerConfiguration") { task ->
-    task.setDescription("Prepares Native Image configuration for the dedicated layer")
-    task.setGroup("build")
-    task.dependsOn(tasks.named("generateTestResourcesConfigFile"))
-    task.dependsOn(tasks.named("prepareDedicatedLayerReachabilityMetadata"))
-    task.inputs.dir(dedicatedLayerReachabilityMetadataDirectory)
-            .withPropertyName("dedicatedLayerReachabilityMetadata")
-            .withPathSensitivity(PathSensitivity.RELATIVE)
-    task.outputs.dir(dedicatedLayerConfigurationDirectory)
-    task.outputs.upToDateWhen { false }
-    task.doLast {
-        File outputDirectory = dedicatedLayerConfigurationDirectory.get().asFile
-        delete(outputDirectory)
-        if (!outputDirectory.mkdirs()) {
-            throw new GradleException("Failed to create base-layer configuration directory: " +
-                    outputDirectory.absolutePath)
-        }
-        resolveNativeTestConfigurationDirectories().eachWithIndex { File directory, int index ->
-            copy {
-                from(directory)
-                into(new File(outputDirectory, "entry-${index}"))
-            }
-        }
-    }
-}
-
-Closure<List<File>> resolveDedicatedLayerConfigurationDirectories = {
-    File outputDirectory = dedicatedLayerConfigurationDirectory.get().asFile
-    File[] directories = outputDirectory.listFiles({ File file -> file.isDirectory() } as FileFilter)
-    return directories == null ? [] : directories.toList().sort { File file -> file.absolutePath }
-}
-
-Closure<List<String>> resolveDedicatedLayerNativeImageArgs = {
-    List<String> arguments = new ArrayList<>(nativeImageArgs)
-    arguments.add("-H:ConfigurationFileDirectories=" +
-            resolveDedicatedLayerConfigurationDirectories()
-                    .collect { File directory -> directory.absolutePath }
-                    .join(","))
-    arguments.add(junitPlatformFeatureArgument)
-    arguments.add("-Djunit.platform.listeners.uid.tracking.output.dir=" +
-            dedicatedLayerJUnitTestListDirectory.get().asFile.absolutePath)
-    return arguments
-}
-
-Closure<List<File>> resolveDedicatedLayerClasspath = {
-    Set<File> classpath = new LinkedHashSet<>(configurations.testRuntimeClasspath
-            .resolvedConfiguration.resolvedArtifacts.collect { artifact -> artifact.file })
-    classpath.addAll(configurations.nativeImageTestClasspath
-            .resolvedConfiguration.resolvedArtifacts.collect { artifact -> artifact.file })
-    return classpath
-            .findAll { File file -> file.isFile() }
-            .toList()
-            .sort { File file -> file.absolutePath }
-}
-
-Closure<Void> validateBaseLayer = {
-    if (!layeredNativeImage) {
-        return
-    }
-    if (!baseLayerFile.isAbsolute()) {
-        throw new GradleException("Property 'tck.baseLayerFile' must contain an absolute path. Got: ${baseLayerFilePath}")
-    }
-    if (!baseLayerFile.isFile()) {
-        throw new GradleException("Native Image base layer does not exist: ${baseLayerFile.absolutePath}")
-    }
-    if (dedicatedLayer) {
-        return
-    }
-    File manifestFile = new File(baseLayerFile.parentFile, "manifest.json")
-    if (!manifestFile.isFile()) {
-        throw new GradleException("Native Image base-layer manifest does not exist: ${manifestFile.absolutePath}")
-    }
-    def currentManifest = new JsonSlurper().parse(manifestFile)
-    def expectedManifest = BaseLayerUtils.expectedManifest(
-            baseLayerFile,
-            providers.exec {
-                commandLine(nativeImageTool("native-image"), "--version")
-            }.standardOutput.asText.get().trim(),
-            selectedNativeImageMode,
-            baseLayerNativeImageArgs
-    )
-    if (currentManifest != expectedManifest) {
-        throw new GradleException("Native Image base-layer manifest does not match the current inputs: ${manifestFile.absolutePath}")
-    }
-}
 
 tasks.register("listLibraryJars") { task ->
     task.setDescription("Lists resolved JARs for the tested library (one per line)")
     task.setGroup(JavaBasePlugin.VERIFICATION_GROUP)
     task.doLast {
-        resolveTestedLibraryJars().each { File file ->
+        artifacts.resolveTestedLibraryJars().each { File file ->
             println file.absolutePath
         }
     }
@@ -722,7 +292,7 @@ if (realUseProject) {
         task.setGroup(JavaBasePlugin.VERIFICATION_GROUP)
         task.doLast {
             List<File> jars = RealUseUtils.declaredLibraryJars(configurations.testImplementation, configurations.testRuntimeClasspath)
-            jars.addAll(resolveTestedLibraryJars())
+            jars.addAll(artifacts.resolveTestedLibraryJars())
             int rules = RealUseUtils.writeUserCodeFilter(file("user-code-filter.json"), jars)
             logger.lifecycle("Wrote user-code-filter.json with ${rules} package rules")
         }
@@ -736,7 +306,7 @@ if (realUseProject) {
         task.setGroup(JavaBasePlugin.VERIFICATION_GROUP)
         task.mustRunAfter("test")
         task.doLast {
-            RealUseUtils.copyAgentMetadata(layout.buildDirectory.get().asFile, requiredAbsolutePathProperty("tck.realUse.agentOutput"))
+            RealUseUtils.copyAgentMetadata(layout.buildDirectory.get().asFile, diagnostics.requiredAbsolutePathProperty("tck.realUse.agentOutput"))
         }
     }
 }
@@ -745,219 +315,9 @@ tasks.register("listRuntimeDependencyArtifacts") { task ->
     task.setDescription("Lists resolved tested-library dependency artifacts for metadata ownership routing")
     task.setGroup(JavaBasePlugin.VERIFICATION_GROUP)
     task.doLast {
-        resolveTestedLibraryDependencyArtifacts().each { Map<String, String> artifact ->
+        artifacts.resolveTestedLibraryDependencyArtifacts().each { Map<String, String> artifact ->
             println "TCK_RUNTIME_DEPENDENCY=${JsonOutput.toJson(artifact)}"
         }
-    }
-}
-
-Provider<Directory> dynamicAccessOutputDir = layout.buildDirectory.dir("native/nativeTestCompile/dynamic-access")
-
-tasks.register("generateDynamicAccessReport") { task ->
-    task.setDescription("Builds native tests with dynamic-access tracking and reuses Gradle up-to-date checks when inputs and classpath are unchanged")
-    task.setGroup(JavaBasePlugin.VERIFICATION_GROUP)
-    task.dependsOn(tasks.named("nativeTestCompile"))
-    // JARs resolve from the Gradle cache where filenames are content-addressed, so name-only is sufficient.
-    task.inputs.files(providers.provider { resolveTestedLibraryJars() })
-            .withPropertyName("trackedLibraryJars")
-            .withPathSensitivity(PathSensitivity.NAME_ONLY)
-    task.inputs.files(sourceSets.test.output)
-            .withPropertyName("testOutputs")
-            .withPathSensitivity(PathSensitivity.RELATIVE)
-    // metadataPath is scoped to the active coordinate via GVM_TCK_MD / -Pmetadata.dir, not the repo-wide metadata root.
-    task.inputs.files(fileTree(metadataPath) { include("**/*.json") })
-            .withPropertyName("metadataFiles")
-            .withPathSensitivity(PathSensitivity.RELATIVE)
-    task.inputs.file(ciJsonFile)
-            .withPropertyName("ciJsonFile")
-            .withPathSensitivity(PathSensitivity.RELATIVE)
-    task.inputs.property("nativeImageArgs", providers.provider { nativeImageArgs })
-    task.outputs.dir(dynamicAccessOutputDir)
-            .withPropertyName("dynamicAccessOutputDir")
-}
-
-Provider<List<String>> nativeTraceBuildArgs = providers.provider {
-    List<String> buildArgs = []
-    if (nativeTraceImageTaskRequested) {
-        buildArgs.add("-H:+UnlockExperimentalVMOptions")
-        buildArgs.add("-H:+MetadataTracingSupport")
-        buildArgs.add("-H:-UnlockExperimentalVMOptions")
-    }
-    List<String> metadataConfigDirs = commaSeparatedGradleProperty("metadataConfigDirs")
-    boolean metadataConfigDirsRequested = project.hasProperty("metadataConfigDirs") &&
-            (nativeTraceImageTaskRequested || nativeTestTaskRequested)
-    if (metadataConfigDirsRequested && !metadataConfigDirs.isEmpty()) {
-        buildArgs.add("-H:ConfigurationFileDirectories=${metadataConfigDirs.join(",")}")
-    }
-    if (runNativeTraceImageTaskRequested) {
-        // The verification gate runs runNativeTraceImage in its correction
-        // loop and routes on the binary's exit code. Bake exact-metadata
-        // reporting + Exit-on-missing into the trace binary so the gate can
-        // observe ExitStatus.MISSING_METADATA (172) for a metadata gap and
-        // distinguish it from other test failures, while still collecting
-        // trace metadata in the same run.
-        buildArgs.add("--exact-reachability-metadata")
-        buildArgs.add("-H:MissingRegistrationReportingMode=Exit")
-    }
-    return buildArgs
-}
-
-Provider<List<String>> pgoBuildArgs = providers.provider {
-    List<String> buildArgs = []
-    if (nativeTestPGOSamplingTaskRequested) {
-        if (!pgoSamplingPeriodMicros.matches("[1-9][0-9]*")) {
-            throw new GradleException(
-                    "'pgoSamplingPeriodMicros' must be a positive integer, got '${pgoSamplingPeriodMicros}'."
-            )
-        }
-
-        // Profiles are guidance-only evidence: sampled stacks show where execution
-        // already runs, and instrumented counters record every branch successor and
-        // virtual-call receiver the run took. Neither proves non-execution (JaCoCo is
-        // the coverage metric). PrintAnalysisCallTreeType=CSV dumps
-        // reports/call_tree_{methods,invokes,targets}_*.csv as the static call graph.
-        buildArgs.add("--pgo-instrument")
-        buildArgs.add("--pgo-sampling")
-        buildArgs.add("-H:+UnlockExperimentalVMOptions")
-        // Released GraalVMs sample at a fixed period and reject the option, so it is
-        // passed only where native-image lists it; a non-default period the
-        // toolchain cannot honour fails the build (§AR-test-harness).
-        String expertOptions = providers.exec {
-            commandLine(nativeImageTool("native-image"), "--expert-options-all")
-            setIgnoreExitValue(true)
-        }.standardOutput.asText.get()
-        if (expertOptions.contains("PGOSamplingPeriodMicros")) {
-            buildArgs.add("-H:PGOSamplingPeriodMicros=${pgoSamplingPeriodMicros}")
-        } else if (pgoSamplingPeriodMicros != "100") {
-            throw new GradleException(
-                    "The selected native-image does not support 'pgoSamplingPeriodMicros'; " +
-                            "it samples at a fixed period, so a period of ${pgoSamplingPeriodMicros} cannot be applied."
-            )
-        }
-        buildArgs.add("-H:+PrintAnalysisCallTree")
-        buildArgs.add("-H:PrintAnalysisCallTreeType=CSV")
-        buildArgs.add("-H:-UnlockExperimentalVMOptions")
-    }
-    return buildArgs
-}
-
-tasks.named("nativeTestCompile", BuildNativeImageTask).configure { BuildNativeImageTask task ->
-    if (dedicatedLayer) {
-        task.dependsOn(tasks.named("nativeLibDedicatedCompile"))
-    }
-    task.doFirst {
-        validateBaseLayer()
-        File nativeImageOutputDirectory = task.outputFile.get().asFile.parentFile
-        if (!nativeImageOutputDirectory.isDirectory() && !nativeImageOutputDirectory.mkdirs()) {
-            throw new GradleException("Failed to create native-image output directory: ${nativeImageOutputDirectory.absolutePath}")
-        }
-        if (runNativeTraceImageTaskRequested) {
-            requiredGradleProperty("traceMetadataPath")
-        }
-    }
-}
-
-Closure<String> deriveTraceMetadataConditionPackages = {
-    String explicitConditionPackages = providers.gradleProperty("traceMetadataConditionPackages").getOrElse("").trim()
-    if (!explicitConditionPackages.isBlank()) {
-        return explicitConditionPackages
-    }
-
-    String userCodeFilterPath = graalvmNative.agent.modes.conditional.userCodeFilterPath.getOrElse("user-code-filter.json")
-    File userCodeFilterFile = file(userCodeFilterPath)
-    if (!userCodeFilterFile.isFile()) {
-        String fallbackPackage = libraryGAV.split(":", 2)[0]
-        logger.warn("Cannot derive TraceMetadataConditionPackages for {}: {} does not exist. Falling back to {}.", libraryGAV, userCodeFilterPath, fallbackPackage)
-        return fallbackPackage
-    }
-
-    def parsed = new JsonSlurper().parse(userCodeFilterFile)
-    def rules = parsed instanceof Map ? parsed.rules : null
-    if (!(rules instanceof List)) {
-        throw new GradleException("Cannot derive TraceMetadataConditionPackages for ${libraryGAV}: ${userCodeFilterPath} must contain a rules array.")
-    }
-
-    List<String> packages = []
-    rules.each { rule ->
-        if (!(rule instanceof Map) || !(rule.includeClasses instanceof String)) {
-            return
-        }
-        String includeClasses = rule.includeClasses.trim()
-        if (includeClasses.isBlank() || includeClasses == "**") {
-            return
-        }
-        String packageName = includeClasses
-        if (packageName.endsWith(".**")) {
-            packageName = packageName.substring(0, packageName.length() - 3)
-        } else if (packageName.endsWith(".*")) {
-            packageName = packageName.substring(0, packageName.length() - 2)
-        } else if (packageName.contains(".")) {
-            packageName = packageName.substring(0, packageName.lastIndexOf("."))
-        }
-        if (!packageName.isBlank() && !packages.contains(packageName)) {
-            packages.add(packageName)
-        }
-    }
-
-    if (packages.isEmpty()) {
-        throw new GradleException("Cannot derive TraceMetadataConditionPackages for ${libraryGAV}: ${userCodeFilterPath} has no includeClasses package rules.")
-    }
-    return packages.join(",")
-}
-
-tasks.register("nativeTraceImage") { task ->
-    task.setDescription("Builds the test native image with runtime metadata tracing support enabled")
-    task.setGroup(LifecycleBasePlugin.BUILD_GROUP)
-    task.dependsOn(tasks.named("nativeTestCompile"))
-}
-
-tasks.register("runNativeTraceImage", Exec) { Exec task ->
-    task.setDescription("Runs the trace-enabled test native image once and writes runtime metadata trace output")
-    task.setGroup(JavaBasePlugin.VERIFICATION_GROUP)
-    task.dependsOn(tasks.named("nativeTraceImage"))
-    task.ignoreExitValue = true
-    task.doFirst {
-        String traceMetadataPath = requiredAbsolutePathProperty("traceMetadataPath")
-        String traceMetadataConditionPackages = deriveTraceMetadataConditionPackages()
-        BuildNativeImageTask nativeTestCompile = tasks.named("nativeTestCompile", BuildNativeImageTask).get()
-        NativeRunTask nativeTest = tasks.named("nativeTest", NativeRunTask).get()
-        File imageFile = nativeTestCompile.outputFile.get().asFile
-        List<String> runtimeArgs = []
-        runtimeArgs.addAll(nativeTest.internalRuntimeArgs.get())
-        runtimeArgs.addAll(nativeTest.runtimeArgs.get())
-        runtimeArgs.add("-XX:TraceMetadata=path=${traceMetadataPath}")
-        runtimeArgs.add("-XX:TraceMetadataConditionPackages=${traceMetadataConditionPackages}")
-        task.executable = imageFile.absolutePath
-        task.args = runtimeArgs
-    }
-    task.doLast {
-        // When -PtraceBinaryExitFile=<absolute path> is supplied, write the
-        // binary's exit code to that file. The verification gate reads this
-        // sentinel to recover ExitStatus.MISSING_METADATA (172) without
-        // grepping Gradle's log output.
-        String exitFilePath = providers.gradleProperty("traceBinaryExitFile").getOrElse("")
-        if (!exitFilePath.isBlank()) {
-            File exitFile = file(exitFilePath)
-            File parent = exitFile.parentFile
-            if (parent != null) {
-                parent.mkdirs()
-            }
-            exitFile.text = String.valueOf(task.executionResult.get().exitValue)
-        }
-    }
-}
-
-tasks.register("mergeNativeTraceMetadata", Exec) { Exec task ->
-    task.setDescription("Merges runtime metadata trace output directories with native-image-utils generate")
-    task.setGroup("Metadata")
-    task.doFirst {
-        List<File> inputDirs = requiredDirectoryListProperty("inputDirs", false)
-        File outputDir = file(requiredAbsolutePathProperty("outputDir"))
-        delete(outputDir)
-        List<String> commandLineArgs = [nativeImageTool("native-image-utils"), "generate"]
-        commandLineArgs.addAll(inputDirs.collect { File inputDir -> "--input-dir=${inputDir.absolutePath}" })
-        commandLineArgs.add("--output-dir=${outputDir.absolutePath}")
-        task.commandLine(commandLineArgs)
     }
 }
 
@@ -967,32 +327,6 @@ String testJavaHome = System.getenv("GVM_TCK_TEST_JAVA_HOME")
 // §AR-test-harness.3.1: opt-in escape hatch for a JDK that rejects Gradle's default `-ea`.
 boolean disableTestAssertions = Boolean.parseBoolean(System.getenv("GVM_TCK_TEST_DISABLE_ASSERTIONS"))
 
-tasks.register("nativeTestPGOSampling") { task ->
-    task.inputs.property("pgoSamplingPeriodMicros", pgoSamplingPeriodMicros)
-    task.setDescription("Builds the test native image with PGO instrumentation, sampling, and the analysis call-tree CSV dump enabled")
-    task.setGroup(LifecycleBasePlugin.BUILD_GROUP)
-    task.dependsOn(tasks.named("nativeTestCompile"))
-}
-
-tasks.register("runNativeTestPGO", Exec) { Exec task ->
-    task.setDescription("Runs the profiled test native image once and writes the .iprof profile")
-    task.setGroup(JavaBasePlugin.VERIFICATION_GROUP)
-    task.dependsOn(tasks.named("nativeTestPGOSampling"))
-    task.doFirst {
-        String pgoProfilePath = requiredAbsolutePathProperty("pgoProfilePath")
-        BuildNativeImageTask nativeTestCompile = tasks.named("nativeTestCompile", BuildNativeImageTask).get()
-        NativeRunTask nativeTest = tasks.named("nativeTest", NativeRunTask).get()
-        File imageFile = nativeTestCompile.outputFile.get().asFile
-        List<String> runtimeArgs = []
-        runtimeArgs.addAll(nativeTest.internalRuntimeArgs.get())
-        runtimeArgs.addAll(nativeTest.runtimeArgs.get())
-        // PGO images dump the profile on exit; pin the output path so the
-        // analyzer reads a known location instead of a working-directory default.iprof.
-        runtimeArgs.add("-XX:ProfilesDumpFile=${pgoProfilePath}")
-        task.executable = imageFile.absolutePath
-        task.args = runtimeArgs
-    }
-}
 
 // Ensure detailed exception/stacktrace logging for all Test tasks, including nativeTest
 tasks.withType(Test).configureEach { Test testTask ->
@@ -1071,7 +405,7 @@ tasks.withType(org.gradle.testing.jacoco.tasks.JacocoReport).configureEach { r -
     }
 
     // Classified artifacts remain executable dependencies but never enter the coverage denominator.
-    List<File> matched = resolveTestedLibraryMainJars()
+    List<File> matched = artifacts.resolveTestedLibraryMainJars()
 
     // Produce one deterministic directory of .class files that represents exactly what the JVM would load at runtime for a given library jar, without duplicates
     int runtimeMajor = (JavaVersion.current().majorVersion as int)
@@ -1128,6 +462,23 @@ tasks.withType(org.gradle.testing.jacoco.tasks.JacocoReport).configureEach { r -
     r.additionalClassDirs.setFrom()
 }
 
+// Keep harness arguments separate from coordinate policy so a base can share
+// the policy without inheriting test metadata, instrumentation, or selectors. §FS-tests.3.2
+Closure<List<String>> resolveNativeTestHarnessBuildArgs = {
+    List<String> arguments = []
+    if (realUseExactReachability) {
+        // §real-use-tests/AR-real-use-test-harness.2: name each missing registration.
+        arguments.add("--exact-reachability-metadata")
+    }
+    arguments.addAll(diagnostics.nativeTraceBuildArgs.get())
+    arguments.addAll(diagnostics.pgoBuildArgs.get())
+    arguments.addAll(nativeLayers.applicationBuildArgs)
+    if (generateDynamicAccessReport) {
+        arguments.addAll(DynamicAccessUtils.buildArgsForClasspathEntries(artifacts.resolveTestedLibraryJars()))
+    }
+    return arguments.collect { Object argument -> argument.toString() }
+}
+
 graalvmNative {
     metadataRepository {
         enabled = true
@@ -1136,68 +487,14 @@ graalvmNative {
     agent {
     }
     binaries {
-        if (dedicatedLayer) {
-            libDedicated {
-                classpath.from(providers.provider { resolveDedicatedLayerClasspath() })
-                buildArgs.addAll(providers.provider { resolveDedicatedLayerNativeImageArgs() })
-                createLayer {
-                    modules = BaseLayerUtils.layerModules()
-                    jars.from(providers.provider { resolveDedicatedLayerJars() })
-                }
-            }
-        }
         test {
             if (override) {
                 excludeConfig.put(libraryGAV, [".*"])
             }
             buildArgs.addAll(nativeImageArgs)
-            if (realUseExactReachability) {
-                // §real-use-tests/AR-real-use-test-harness.2: name each missing registration.
-                buildArgs.add("--exact-reachability-metadata")
-            }
-            buildArgs.addAll(nativeTraceBuildArgs)
-            buildArgs.addAll(pgoBuildArgs)
-            if (dedicatedLayer) {
-                buildArgs.add(coordinateMetadataArgument)
-                buildArgs.addAll(providers.provider {
-                    List<File> metadataDirectories = resolveDedicatedLayerReachabilityMetadataDirectories()
-                    return metadataDirectories.isEmpty() ? [] : [
-                            "-H:ConfigurationFileDirectories=" +
-                                    metadataDirectories.collect { File file -> file.absolutePath }.join(",")
-                    ]
-                })
-            }
-            if (layeredNativeImage && !dedicatedLayer) {
-                buildArgs.addAll([
-                        "-H:+UnlockExperimentalVMOptions",
-                        "-H:LayerUse=${baseLayerFile.absolutePath}",
-                        "-H:LinkerRPath=${baseLayerFile.parentFile.absolutePath}",
-                        "-H:-UnlockExperimentalVMOptions"
-                ])
-            }
-            if (generateDynamicAccessReport) {
-                buildArgs.addAll(providers.provider {
-                    DynamicAccessUtils.buildArgsForClasspathEntries(resolveTestedLibraryJars())
-                })
-            }
-            if (dedicatedLayer) {
-                useLayer("libDedicated")
-            }
+            buildArgs.addAll(providers.provider { resolveNativeTestHarnessBuildArgs() })
         }
     }
 }
 
-if (dedicatedLayer) {
-    tasks.named("nativeLibDedicatedCompile", BuildNativeImageTask).configure { task ->
-        task.dependsOn(tasks.named("generateDedicatedLayerJUnitTestList"))
-        task.dependsOn(tasks.named("prepareDedicatedLayerConfiguration"))
-        task.outputDirectory.set(baseLayerFile.parentFile)
-        task.doFirst {
-            File workingDirectory = task.workingDirectory.get().asFile
-            if (!workingDirectory.isDirectory() && !workingDirectory.mkdirs()) {
-                throw new GradleException("Failed to create native-image working directory: " +
-                        workingDirectory.absolutePath)
-            }
-        }
-    }
-}
+nativeLayers.configure(artifacts, providers.provider { resolveNativeTestHarnessBuildArgs() })

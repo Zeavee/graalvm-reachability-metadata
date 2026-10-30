@@ -29,20 +29,21 @@ rather than by kind.
 | [§AR-scan-docker-images](ci.md#ar-scan-docker-images-scan-docker-images) | Scan Docker images |
 | [§AR-sync-docker-images](ci.md#ar-sync-docker-images-sync-docker-images) | Sync Docker images |
 | [§AR-macaron-check](ci.md#ar-macaron-check-check-github-actions-with-macaron) | Check GitHub Actions with Macaron |
-| [§AR-layered-tests](ci.md#ar-layered-tests-shared-and-dedicated-native-image-layer-tests) | Shared and dedicated Native Image layer tests |
-| [§AR-test-all-metadata](ci.md#ar-test-all-metadata-test-all-metadata) | Test all metadata |
-| [§AR-verify-new-library-version-compatibility](ci.md#ar-verify-new-library-version-compatibility-verify-new-library-version-compatibility) | Verify new library version compatibility |
-| [§AR-publish-scheduled-coverage](ci.md#ar-publish-scheduled-coverage-publish-scheduled-coverage) | Publish scheduled coverage |
-| [§AR-create-scheduled-release](ci.md#ar-create-scheduled-release-create-scheduled-release) | Create scheduled release |
-| [§AR-create-snapshot-release](ci.md#ar-create-snapshot-release-create-snapshot-release) | Create snapshot release |
-| [§AR-test-all-metadata-crema](ci.md#ar-test-all-metadata-crema-test-all-metadata-on-the-crema-jvm) | Test all metadata on the Crema JVM |
+| [§AR-layered-tests](ci-scheduled.md#ar-layered-tests-shared-and-dedicated-native-image-layer-tests) | Shared and dedicated Native Image layer tests |
+| [§AR-test-all-metadata](ci-scheduled.md#ar-test-all-metadata-test-all-metadata) | Test all metadata |
+| [§AR-verify-new-library-version-compatibility](ci-scheduled.md#ar-verify-new-library-version-compatibility-verify-new-library-version-compatibility) | Verify new library version compatibility |
+| [§AR-publish-scheduled-coverage](ci-scheduled.md#ar-publish-scheduled-coverage-publish-scheduled-coverage) | Publish scheduled coverage |
+| [§AR-create-scheduled-release](ci-scheduled.md#ar-create-scheduled-release-create-scheduled-release) | Create scheduled release |
+| [§AR-create-snapshot-release](ci-scheduled.md#ar-create-snapshot-release-create-snapshot-release) | Create snapshot release |
+| [§AR-test-all-metadata-crema](ci-scheduled.md#ar-test-all-metadata-crema-test-all-metadata-on-the-crema-jvm) | Test all metadata on the Crema JVM |
 | [§AR-triage-new-issues](ci.md#ar-triage-new-issues-triage-new-issues) | Triage new issues |
-| [§AR-detect-file-changes](ci.md#ar-detect-file-changes-detect-file-changes-action) | detect-file-changes action |
-| [§AR-setup-native-build-tools](ci.md#ar-setup-native-build-tools-setup-native-build-tools-action) | setup-native-build-tools action |
-| [§AR-setup-native-image-base-layer](ci.md#ar-setup-native-image-base-layer-setup-native-image-base-layer-action) | setup-native-image-base-layer action |
-| [§AR-setup-crema-jdk](ci.md#ar-setup-crema-jdk-setup-crema-jdk-action) | setup-crema-jdk action |
+| [§AR-detect-file-changes](ci-actions.md#ar-detect-file-changes-detect-file-changes-action) | detect-file-changes action |
+| [§AR-setup-native-build-tools](ci-actions.md#ar-setup-native-build-tools-setup-native-build-tools-action) | setup-native-build-tools action |
+| [§AR-setup-native-image-base-layer](ci-actions.md#ar-setup-native-image-base-layer-setup-native-image-base-layer-action) | setup-native-image-base-layer action |
+| [§AR-setup-crema-jdk](ci-actions.md#ar-setup-crema-jdk-setup-crema-jdk-action) | setup-crema-jdk action |
 | [§AR-shared-scripts](ci.md#ar-shared-scripts-shared-scripts-and-test-isolation) | Shared scripts and test isolation |
 | [§AR-test-harness](tck.md#ar-test-harness-test-harness-tck-task-groups) | Test harness (TCK) task groups |
+| [§AR-native-test-layers](native-test-layers.md#ar-native-test-layers-native-test-layer-construction) | Shared and dedicated native test layers |
 
 This index is navigational. Cite the specific declaration ID rather than this
 file.
@@ -55,5 +56,7 @@ Files:
   plugins, and scaffolding the suites run on.
 - [tck.md](tck.md) — the harness task groups: selection, validation, test lanes,
   tracing, authoring, matrices, and reporting.
-- [ci.md](ci.md) — the workflows, composite actions, and shared scripts, one
-  citable declaration each.
+- [ci.md](ci.md) — CI overview, PR gates, event automation, and shared scripts.
+- [ci-scheduled.md](ci-scheduled.md) — scheduled test sweeps, version updates,
+  coverage publishing, and releases.
+- [ci-actions.md](ci-actions.md) — reusable CI composite actions.

@@ -19,6 +19,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -78,6 +79,51 @@ class CustomSharedLayerTests {
 
     @Test
     void commonBaseBuilderStillReusesMatchingManifests() throws IOException {
+        Path project = commonBaseFixture();
+
+        run(project, "buildCommonFixtureLayer");
+        run(project, "buildCommonFixtureLayer");
+
+        assertThat(Files.readAllLines(tempDir.resolve("build-count"))).hasSize(1);
+    }
+
+    @Test
+    void shardReusesMatchingBaseWithoutBuilding() throws IOException {
+        Path project = commonBaseFixture();
+        run(project, "buildCommonFixtureLayer");
+
+        runner(project, "buildCommonFixtureLayer", "-PrequireExisting=true").build();
+
+        assertThat(Files.readAllLines(tempDir.resolve("build-count"))).hasSize(1);
+    }
+
+    @Test
+    void shardRejectsMissingBaseWithoutBuilding() throws IOException {
+        Path project = commonBaseFixture();
+
+        BuildResult result = runner(project, "buildCommonFixtureLayer", "-PrequireExisting=true").buildAndFail();
+
+        assertThat(result.getOutput()).contains("common-base rebuilding is disabled for this shard");
+        assertThat(tempDir.resolve("build-count")).doesNotExist();
+    }
+
+    @Test
+    void shardRejectsIncompatibleManifestWithoutReplacingBase() throws IOException {
+        Path project = commonBaseFixture();
+        run(project, "buildCommonFixtureLayer");
+        Path manifest = tempDir.resolve("common/manifest.json");
+        String incompatible = Files.readString(manifest).replace("current-defaults", "future-defaults");
+        Files.writeString(manifest, incompatible);
+
+        BuildResult result = runner(project, "buildCommonFixtureLayer", "-PrequireExisting=true").buildAndFail();
+
+        assertThat(result.getOutput()).contains("common-base rebuilding is disabled for this shard");
+        assertThat(Files.readString(manifest)).isEqualTo(incompatible);
+        assertThat(tempDir.resolve("common/base-layer.nil")).exists();
+        assertThat(Files.readAllLines(tempDir.resolve("build-count"))).hasSize(1);
+    }
+
+    private Path commonBaseFixture() throws IOException {
         Path project = fixture("");
         Path buildFile = project.resolve("build.gradle");
         Files.writeString(buildFile, """
@@ -89,16 +135,14 @@ class CustomSharedLayerTests {
                 tasks.register('buildCommonFixtureLayer') {
                     doLast {
                         SharedLayerBuildUtils.build(project, project.services.get(ExecOperations),
-                            file('%s'), '%s', 'current-defaults', ['--verbose'], true)
+                            file('%s'), '%s', 'current-defaults', ['--verbose'], true,
+                            project.hasProperty('requireExisting'))
                     }
                 }
                 """.formatted(tempDir.resolve("common/base-layer.nil"), tempDir.resolve("graal/bin/native-image")),
                 StandardOpenOption.APPEND);
 
-        run(project, "buildCommonFixtureLayer");
-        run(project, "buildCommonFixtureLayer");
-
-        assertThat(Files.readAllLines(tempDir.resolve("build-count"))).hasSize(1);
+        return project;
     }
 
     private Path fixture(String binaries) throws IOException {
@@ -139,11 +183,16 @@ class CustomSharedLayerTests {
     }
 
     private BuildResult run(Path project, String buildTask) {
+        return runner(project, buildTask).build();
+    }
+
+    private GradleRunner runner(Path project, String... arguments) {
         Map<String, String> environment = new HashMap<>(System.getenv());
         environment.put("GRAALVM_HOME", tempDir.resolve("graal").toString());
+        List<String> tasks = new ArrayList<>(List.of(arguments));
+        tasks.addAll(List.of("inspectSelectedBase", "--offline", "--quiet"));
         return GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath()
                 .withEnvironment(environment)
-                .withArguments(buildTask, "inspectSelectedBase", "--offline", "--quiet")
-                .build();
+                .withArguments(tasks);
     }
 }

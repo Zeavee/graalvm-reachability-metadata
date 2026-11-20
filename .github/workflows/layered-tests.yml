@@ -24,7 +24,7 @@ on:
         required: true
         default: "all"
       java-version:
-        description: "GraalVM Java version"
+        description: "GraalVM Java version (use dev for a GraalVM master build)"
         required: true
         default: "latest-ea"
       native-image-mode:

@@ -170,6 +170,10 @@ shards do not consume the common base and can run even if its preparation
 fails; dedicated-only runs skip that work. Coordinate-specific shared bases
 retain their uncached construction policy.
 
+Manual runs can select a GraalVM development build from the GraalVM master
+branch without waiting for an early-access release. The preparation job
+resolves the selected build once and shares that installation with every shard.
+
 All jobs test the same resolved repository revision. Before using the prepared
 base, a shared shard verifies that revision, the installed GraalVM build,
 OS/architecture, and Native Image mode. Missing or incompatible prepared bases

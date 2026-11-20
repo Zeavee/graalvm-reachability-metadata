@@ -28,6 +28,8 @@ coordinate, JDK, or mode. A concrete coordinate or explicit shard creates one
 job per selected lane. The shared lane uses a JDK base; the dedicated lane
 creates a base containing the tested library for each coordinate
 (§AR-test-harness.3).
+Set `java-version` to `dev` to use the latest GraalVM Community Edition
+development build from the GraalVM master branch (§FS-tests.3.6).
 Dedicated layers are deleted after each coordinate to bound runner disk use;
 failures are collected independently so the two layer layouts remain directly
 comparable.

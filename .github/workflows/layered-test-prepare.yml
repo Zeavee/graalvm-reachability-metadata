@@ -60,7 +60,8 @@ jobs:
       - name: "Download GraalVM for base preparation"
         uses: graalvm/setup-graalvm@60c26726de13f8b90771df4bc1641a52a3159994 # v1
         with:
-          distribution: "graalvm"
+          # GraalVM publishes master development builds as Community Edition. §FS-tests.3.6
+          distribution: ${{ inputs.java-version == 'dev' && 'graalvm-community' || 'graalvm' }}
           java-version: ${{ inputs.java-version }}
           set-java-home: "true"
           github-token: ${{ secrets.GITHUB_TOKEN }}
